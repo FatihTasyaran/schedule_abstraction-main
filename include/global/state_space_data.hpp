@@ -135,6 +135,11 @@ namespace NP {
 				return abort_actions[j];
 			}
 
+			const Job<Time>& ret_lookup(const Job_index idx) const{
+				const Job<Time>& j = lookup<Time>(jobs, idx);
+				return j;
+			}
+
 			// returns the ready time interval of `j` in `s`
 			// assumes all predecessors of j are completed
 			Interval<Time> ready_times(const State& s, const Job<Time>& j) const
@@ -364,6 +369,7 @@ namespace NP {
 						continue;
 
 					DM("         * found it: " << j.earliest_arrival() << std::endl);
+					DM("         * found job:" << j << std::endl);
 					// it's incomplete and not ignored => found the earliest
 					return j.earliest_arrival();
 				}
@@ -438,6 +444,15 @@ namespace NP {
 					return jobs_by_earliest_arrival.begin()->first;
 			}
 
+			Job_ref get_earliest_arriving_job() const
+			{
+				if (jobs_by_earliest_arrival.empty())
+					return nullptr;
+				else
+					return jobs_by_earliest_arrival.begin->second;
+			}
+
+			
 			// Find the earliest certain job release of all sequential source jobs
 			// (i.e., without predecessors and with minimum parallelism = 1) when
 			// the system starts

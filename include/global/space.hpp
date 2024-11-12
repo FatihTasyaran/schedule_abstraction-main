@@ -233,14 +233,17 @@ namespace NP {
 			struct Response_time_item {
 				bool valid;
 				Interval<Time> rt;
+				Interval<Time> n_rt;
 
 				Response_time_item()
 					: valid(false)
 					, rt(0, 0)
+					, n_rt(0, 0)
 				{
 				}
 			};
 			typedef std::vector<Response_time_item> Response_times;
+			//typedef std::vector<Time> r_bar_min;
 
 #ifdef CONFIG_COLLECT_SCHEDULE_GRAPH
 			std::deque<Edge> edges;
@@ -320,6 +323,8 @@ namespace NP {
 				, partial_rta(jobs.size())
 #endif
 			{
+				//r_bar_min r_bar_mins;
+				//r_bar_mins.resize(jobs.size());
 			}
 
 		private:
@@ -334,22 +339,25 @@ namespace NP {
 			}
 
 			void update_finish_times(Response_times& r, const Job_index id,
-				Interval<Time> range)
+				Interval<Time> range, Time n_bcrt, Time n_wcrt)
 			{
 				if (!r[id].valid) {
 					r[id].valid = true;
 					r[id].rt = range;
+					r[id].n_rt = Interval(n_bcrt, n_wcrt);
 				}
 				else {
 					r[id].rt |= range;
 				}
 				DM("RTA " << id << ": " << r[id].rt << std::endl);
+				DM("N_RTA " << id << ": " << r[id].n_rt << std::endl);
+				//DM("In  A: " << state_space_data.predecessors[id] << std::endl);
 			}
 
 			void update_finish_times(
-				Response_times& r, const Job<Time>& j, Interval<Time> range)
+				Response_times& r, const Job<Time>& j, Interval<Time> range, Time n_bcrt, Time n_wcrt)
 			{
-				update_finish_times(r, j.get_job_index(), range);
+				update_finish_times(r, j.get_job_index(), range, n_bcrt, n_wcrt);
 				if (j.exceeds_deadline(range.upto())) {
 					observed_deadline_miss = true;
 
@@ -358,7 +366,7 @@ namespace NP {
 				}
 			}
 
-			void update_finish_times(const Job<Time>& j, Interval<Time> range)
+			void update_finish_times(const Job<Time>& j, Interval<Time> range, Time n_bcrt, Time n_wcrt)
 			{
 				Response_times& r =
 #ifdef CONFIG_PARALLEL
@@ -366,8 +374,10 @@ namespace NP {
 #else
 					rta;
 #endif
-				update_finish_times(r, j, range);
+				update_finish_times(r, j, range, n_bcrt, n_wcrt);
 			}
+
+			
 
 			void make_initial_node(unsigned num_cores)
 			{
@@ -494,6 +504,7 @@ namespace NP {
 			Node& new_node(Args&&... args)
 			{
 				Node_ref n = alloc_node(std::forward<Args>(args)...);
+				DM("This is called" << std::endl);
 				DM("new node - global " << n << std::endl);
 				// add node to nodes_by_key map.
 				cache_node(n);
@@ -547,13 +558,15 @@ namespace NP {
 								auto frange = new_n.get_last_state()->core_availability(pmin) + j.get_cost(pmin);
 								Node& next =
 									new_node(new_n, j, j.get_job_index(), state_space_data, 0, 0, 0);
+								
 								//const CoreAvailability empty_cav = {};
 								State& next_s = new_state(*new_n.get_last_state(), j.get_job_index(), frange, frange, new_n.get_scheduled_jobs(), new_n.get_jobs_with_pending_successors(), new_n.get_ready_successor_jobs(), state_space_data, new_n.get_next_certain_source_job_release(), pmin);
 								next.add_state(&next_s);
 								num_states++;
 
 								// update response times
-								update_finish_times(j, frange);
+								DM("update RESPONSE TIMES" << std::endl);
+								update_finish_times(j, frange, (Time)-1, (Time)-1);
 #ifdef CONFIG_COLLECT_SCHEDULE_GRAPH
 								edges.emplace_back(&j, &new_n, &next, frange, pmin);
 #endif
@@ -591,7 +604,7 @@ namespace NP {
 				auto rt = state_space_data.earliest_ready_time(s, j);
 				auto at = s.core_availability(ncores).min();
 				Time est = std::max(rt, at);
-
+				DM("This is job: " << j.get_job_index() << std::endl;)
 				DM("rt: " << rt << std::endl
 					<< "at: " << at << std::endl);
 
@@ -647,16 +660,24 @@ namespace NP {
 				// If such a node already exists, we keep a reference to it
 				Node_ref next = nullptr;
 				DM("--- global:dispatch() " << n << ", " << j << ", " << t_wc_wos << ", " << t_high_wos << std::endl);
+				DM("Dispatched jobs in that node: " << n.get_scheduled_jobs() << std::endl);
+				
+				DM("Earliest pending release: " << n.earliest_job_release() << std::endl);
+				
+				//state_space_data.earliest_possible_job_release(n, j)
 
 				bool dispatched_one = false;
 
 				// loop over all states in the node n
 				const auto* n_states = n.get_states();
+
 #ifdef CONFIG_PARALLEL
 				Nodes_map_accessor acc;
-#endif
+#endif	
+	
 				for (State* s : *n_states)
 				{
+			
 					const auto& costs = j.get_all_costs();
 					// check for all possible parallelism levels of the moldable gang job j (if j is not gang or not moldable than min_paralellism = max_parallelism and costs only constains a single element).
 					//for (unsigned int p = j.get_max_parallelism(); p >= j.get_min_parallelism(); p--)
@@ -669,7 +690,7 @@ namespace NP {
 						Time t_high_succ = state_space_data.next_certain_higher_priority_successor_job_ready_time(n, *s, j, p, t_wc + 1);
 						Time t_high_gang = state_space_data.next_certain_higher_priority_gang_source_job_ready_time(n, *s, j, p, t_wc + 1);
 						Time t_high = std::min(t_high_wos, std::min(t_high_gang, t_high_succ));
-
+						//DM("job:" << *state_space_data.get_earliest_arriving_job() << std::endl)
 						// If j can execute on ncores+k cores, then 
 						// the scheduler will start j on ncores only if 
 						// there isn't ncores+k cores available
@@ -691,10 +712,57 @@ namespace NP {
 						Interval<Time> ftimes = calculate_abort_time(j, _st.first, _st.second, eft, lft);
 
 						// yep, job j is a feasible successor in state s
-						dispatched_one = true;						
+						dispatched_one = true;
+
+						//////////////////////////////////////////
+						//Collecting all information here for now
+						//////////////////////////////////////////
+						Job_index j_idx = j.get_job_index();
+						const Job_precedence_set &predecessors = state_space_data.predecessors_of(j_idx);
+						Time max_pred_eft = 0;
+						Time max_pred_lft = 0;
+						for(auto pred: predecessors){
+							std::cout << "IN dispatch: Job: " << j_idx << " pred: " << pred << std::endl;
+							Job pred_j = state_space_data.jobs[pred];
+							Time pred_min_cost = pred_j.least_exec_time();
+							Time pred_max_cost = pred_j.maximal_exec_time();
+							Time pred_est = s->saved_starts[pred].first;
+							Time pred_lst = s->saved_starts[pred].second;
+							Time pred_eft = pred_est + pred_min_cost;
+							Time pred_lft = pred_lst + pred_max_cost;
+							std::cout << "it's est: " << s->saved_starts[pred].first << " it's lst:" << s->saved_starts[pred].second << std::endl;
+							if(pred_eft > max_pred_eft){max_pred_eft = pred_eft;}
+							if(pred_lft > max_pred_lft){max_pred_lft = pred_lft;}
+						}
+						Time r_i_min = j.earliest_arrival();
+						if(max_pred_eft > r_i_min){r_i_min = max_pred_eft;}
+						Time r_i_max = j.latest_arrival();
+						if(max_pred_lft > r_i_max){r_i_max = max_pred_lft;}
+						Time r_bar_i_min = r_i_min;
+						Time max_est_of_lpi = s->get_max_est_of_lpi(j_idx);
+						if(max_est_of_lpi > r_bar_i_min){r_bar_i_min = max_est_of_lpi;}
+
+						Time n_bcrt = exec_time.min();
+						if((eft - r_i_max) > n_bcrt){n_bcrt = (eft - r_i_max);}
+						t_avail = s->core_availability().max();
+						Time n_wcrt = exec_time.max() + (t_avail - r_bar_i_min);
+						std::cout << "##########################################################" << std::endl;
+						std::cout << "exec_time.min(): " << exec_time.min() << std::endl;
+						std::cout << "eft: " << eft << " r_i_max: " << r_i_max << " eft - r_i_max: " << eft - r_i_max << std::endl;
+						std::cout << "r_bar_i_min: " << r_bar_i_min << std::endl;
+						std::cout << "HERE n_bcrt: " << n_bcrt << " n_wcrt: " << n_wcrt << std::endl;
+						std::cout << "exec_time.max(): " << exec_time.max() << " t_avail: " << t_avail << std::endl;
+						std::cout << "##########################################################" << std::endl;
+						//////////////////////////////////////////
+						//Collecting all information here for now
+						//////////////////////////////////////////
 
 						// update finish-time estimates
-						update_finish_times(j, ftimes);
+						//This one is called normally, the other one is called if there is an early exit to finalize response times
+						DM("update ESTIMATES" << std::endl);
+						update_finish_times(j, ftimes, n_bcrt, n_wcrt);
+
+					
 
 #ifdef CONFIG_PARALLEL
 						// if we do not have a pointer to a node with the same set of scheduled job yet,
@@ -761,8 +829,10 @@ namespace NP {
 								}
 							}
 							// If there is no node yet, create one.
-							if (next == nullptr)
+							if (next == nullptr){
+								DM("Created here 1?" << std::endl);
 								next = &(new_node(n, j, j.get_job_index(), state_space_data, state_space_data.earliest_possible_job_release(n, j), state_space_data.earliest_certain_source_job_release(n, j), state_space_data.earliest_certain_sequential_source_job_release(n, j)));
+							}
 						}
 #endif
 						// next should always exist at this point, possibly without states in it
@@ -808,7 +878,7 @@ namespace NP {
 				// certainly schedules some job
 				auto upbnd_t_wc = std::max(avail_max, nxt_ready_job);
 
-				DM(n << std::endl);
+				DM("This is n: " << n << std::endl);
 				DM("t_min: " << t_min << std::endl
 					<< "nxt_ready_job: " << nxt_ready_job << std::endl
 					<< "avail_max: " << avail_max << std::endl
@@ -822,6 +892,7 @@ namespace NP {
 				{
 					const Job<Time>& j = *it->second;
 					DM(j << " (" << j.get_job_index() << ")" << std::endl);
+					DM(j << " unfinished?: " << unfinished(n,j) << std::endl);
 					// stop looking once we've left the window of interest
 					if (j.earliest_arrival() > upbnd_t_wc)
 						break;
